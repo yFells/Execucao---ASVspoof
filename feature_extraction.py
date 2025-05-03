@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Módulo para extração de características acústicas híbridas para detecção de ataques de replay.
-Implementa a extração de MFCC, CQCC, e espectrogramas Mel, além de características de padrões (LBP, GLCM, LPQ).
+Módulo modificado para extração de características acústicas híbridas para detecção de ataques de replay.
+Inclui suporte alternativo para carregar arquivos FLAC.
 
 Autores: André Thiago de Souza, Felipe de Lima dos Santos, 
          Juliano Gaona Proença, Matheus Henrique Reich Favarin Zagonel
 """
 
 import numpy as np
-import librosa
-import librosa.display
-import scipy
 import os
+import librosa
+import soundfile as sf
 from skimage.feature import local_binary_pattern, graycomatrix, graycoprops
 from scipy.signal import lfilter
+import warnings
+from tqdm import tqdm
+import argparse
+import traceback
+
+# Para tentar alternativas quando o librosa falhar
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+    print("Pydub não está instalado. Será usada como segunda opção caso o librosa falhe.")
+    print("Para instalar: pip install pydub")
+
 
 class FeatureExtractor:
     """Classe para extração de características acústicas para detecção de ataques de replay."""
@@ -57,6 +70,69 @@ class FeatureExtractor:
         # Parâmetros para detecção de silêncio
         self.silence_threshold = 0.0001
         self.min_silence_duration = 0.1
+
+    def load_audio(self, audio_path):
+        """
+        Carrega arquivo de áudio com suporte a múltiplos backends.
+        Tenta vários métodos para carregar o áudio em caso de falha.
+        
+        Args:
+            audio_path: Caminho para o arquivo de áudio
+            
+        Returns:
+            Sinal de áudio carregado e taxa de amostragem
+        """
+        # Método 1: Tentar com soundfile diretamente
+        try:
+            audio, sr = sf.read(audio_path)
+            # Converter para mono se estéreo
+            if len(audio.shape) > 1:
+                audio = np.mean(audio, axis=1)
+            # Resample se necessário
+            if sr != self.sample_rate:
+                audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
+            return audio, self.sample_rate
+        except Exception as e:
+            print(f"Falha ao abrir com soundfile: {str(e)}")
+        
+        # Método 2: Tentar com librosa
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
+                return audio, sr
+        except Exception as e:
+            print(f"Falha ao abrir com librosa: {str(e)}")
+        
+        # Método 3: Tentar com pydub se disponível
+        if PYDUB_AVAILABLE:
+            try:
+                # Determinar o formato a partir da extensão
+                ext = os.path.splitext(audio_path)[1].lower().replace('.', '')
+                
+                # Carregar o áudio com pydub
+                audio_segment = AudioSegment.from_file(audio_path, format=ext)
+                
+                # Converter para mono se estéreo
+                if audio_segment.channels > 1:
+                    audio_segment = audio_segment.set_channels(1)
+                
+                # Resample se necessário
+                if audio_segment.frame_rate != self.sample_rate:
+                    audio_segment = audio_segment.set_frame_rate(self.sample_rate)
+                
+                # Extrair dados de áudio como array numpy
+                samples = np.array(audio_segment.get_array_of_samples())
+                
+                # Normalizar para o intervalo [-1, 1] (pydub retorna inteiros)
+                samples = samples.astype(np.float32) / (1 << (8 * audio_segment.sample_width - 1))
+                
+                return samples, self.sample_rate
+            except Exception as e:
+                print(f"Falha ao abrir com pydub: {str(e)}")
+        
+        # Se todas as tentativas falharem
+        raise ValueError(f"Não foi possível carregar o arquivo: {audio_path}. Tente instalar ffmpeg ou verifique a integridade do arquivo.")
         
     def preprocess_audio(self, audio):
         """
@@ -112,30 +188,38 @@ class FeatureExtractor:
         Returns:
             Matriz de características CQCC com delta e delta-delta
         """
-        # Transformada Q Constante
-        CQT = np.abs(librosa.cqt(
-            y=audio, 
-            sr=self.sample_rate,
-            hop_length=self.hop_length,
-            n_bins=96,  # Número de bins por oitava * número de oitavas
-            bins_per_octave=24
-        ))
-        
-        # Aplicação de log na CQT
-        log_CQT = np.log(CQT + 1e-6)
-        
-        # Transformada de cosseno discreta (DCT)
-        cqcc = scipy.fftpack.dct(log_CQT, axis=0, type=2, norm='ortho')
-        
-        # Manter apenas os n_cqcc primeiros coeficientes
-        cqcc = cqcc[:self.n_cqcc, :]
-        
-        # Cálculo de delta e delta-delta
-        delta_cqcc = librosa.feature.delta(cqcc)
-        delta2_cqcc = librosa.feature.delta(cqcc, order=2)
-        
-        # Concatenação de CQCC, delta e delta-delta
-        return np.vstack([cqcc, delta_cqcc, delta2_cqcc])
+        try:
+            from scipy import fftpack
+            
+            # Transformada Q Constante
+            CQT = np.abs(librosa.cqt(
+                y=audio, 
+                sr=self.sample_rate,
+                hop_length=self.hop_length,
+                n_bins=96,  # Número de bins por oitava * número de oitavas
+                bins_per_octave=24
+            ))
+            
+            # Aplicação de log na CQT
+            log_CQT = np.log(CQT + 1e-6)
+            
+            # Transformada de cosseno discreta (DCT)
+            cqcc = fftpack.dct(log_CQT, axis=0, type=2, norm='ortho')
+            
+            # Manter apenas os n_cqcc primeiros coeficientes
+            cqcc = cqcc[:self.n_cqcc, :]
+            
+            # Cálculo de delta e delta-delta
+            delta_cqcc = librosa.feature.delta(cqcc)
+            delta2_cqcc = librosa.feature.delta(cqcc, order=2)
+            
+            # Concatenação de CQCC, delta e delta-delta
+            return np.vstack([cqcc, delta_cqcc, delta2_cqcc])
+        except Exception as e:
+            print(f"Erro ao extrair CQCC: {str(e)}")
+            # Retornar matriz de zeros em caso de erro
+            frames = 1 + int((len(audio) - self.win_length) / self.hop_length)
+            return np.zeros((self.n_cqcc * 3, frames))
     
     def extract_mel_spectrogram(self, audio):
         """
@@ -174,7 +258,7 @@ class FeatureExtractor:
             Imagem LBP
         """
         # Normalizar o espectrograma para [0, 1]
-        normalized_mel = (mel_spectrogram - np.min(mel_spectrogram)) / (np.max(mel_spectrogram) - np.min(mel_spectrogram))
+        normalized_mel = (mel_spectrogram - np.min(mel_spectrogram)) / (np.max(mel_spectrogram) - np.min(mel_spectrogram) + 1e-10)
         
         # Aplicar LBP
         lbp_image = local_binary_pattern(
@@ -197,7 +281,7 @@ class FeatureExtractor:
             Características GLCM
         """
         # Normalizar o espectrograma para valores entre 0 e 255
-        temp_mel = (mel_spectrogram - np.min(mel_spectrogram)) / (np.max(mel_spectrogram) - np.min(mel_spectrogram))
+        temp_mel = (mel_spectrogram - np.min(mel_spectrogram)) / (np.max(mel_spectrogram) - np.min(mel_spectrogram) + 1e-10)
         image_uint8 = (temp_mel * 255).astype(np.uint8)
         
         # Quantizar a imagem para reduzir o número de níveis de cinza (para eficiência)
@@ -205,30 +289,35 @@ class FeatureExtractor:
         image_quant = (image_uint8 // (256 // n_levels)).astype(np.uint8)
         
         # Calcular GLCM
-        glcm = graycomatrix(
-            image_quant, 
-            distances=self.glcm_distances, 
-            angles=self.glcm_angles,
-            levels=n_levels,
-            symmetric=True,
-            normed=True
-        )
-        
-        # Extrair características de GLCM
-        contrast = graycoprops(glcm, 'contrast')
-        dissimilarity = graycoprops(glcm, 'dissimilarity')
-        homogeneity = graycoprops(glcm, 'homogeneity')
-        energy = graycoprops(glcm, 'energy')
-        correlation = graycoprops(glcm, 'correlation')
-        
-        # Flatten e concatenar as características
-        features = np.hstack([
-            contrast.ravel(), dissimilarity.ravel(),
-            homogeneity.ravel(), energy.ravel(),
-            correlation.ravel()
-        ])
-        
-        return features
+        try:
+            glcm = graycomatrix(
+                image_quant, 
+                distances=self.glcm_distances, 
+                angles=self.glcm_angles,
+                levels=n_levels,
+                symmetric=True,
+                normed=True
+            )
+            
+            # Extrair características de GLCM
+            contrast = graycoprops(glcm, 'contrast')
+            dissimilarity = graycoprops(glcm, 'dissimilarity')
+            homogeneity = graycoprops(glcm, 'homogeneity')
+            energy = graycoprops(glcm, 'energy')
+            correlation = graycoprops(glcm, 'correlation')
+            
+            # Flatten e concatenar as características
+            features = np.hstack([
+                contrast.ravel(), dissimilarity.ravel(),
+                homogeneity.ravel(), energy.ravel(),
+                correlation.ravel()
+            ])
+            
+            return features
+        except Exception as e:
+            print(f"Erro ao extrair GLCM: {str(e)}")
+            # Retornar um vetor de zeros em caso de erro
+            return np.zeros(len(self.glcm_distances) * len(self.glcm_angles) * 5)
         
     def extract_lpq(self, mel_spectrogram):
         """
@@ -240,58 +329,66 @@ class FeatureExtractor:
         Returns:
             Imagem LPQ
         """
-        # Normalizar o espectrograma para [0, 1]
-        normalized_mel = (mel_spectrogram - np.min(mel_spectrogram)) / (np.max(mel_spectrogram) - np.min(mel_spectrogram))
+        try:
+            from scipy import signal
+            
+            # Normalizar o espectrograma para [0, 1]
+            normalized_mel = (mel_spectrogram - np.min(mel_spectrogram)) / (np.max(mel_spectrogram) - np.min(mel_spectrogram) + 1e-10)
+            
+            # Parâmetros para LPQ
+            winSize = 5  # Tamanho da janela para LPQ
+            
+            # Implementação simplificada de LPQ
+            # (Nota: Para uma implementação completa, recomenda-se usar bibliotecas específicas)
+            STFTalpha = 1/winSize  # Parâmetro alfa para STFT
+            
+            # Criar filtros para STFT
+            x = np.arange(-(winSize-1)/2, (winSize+1)/2, 1)
+            y = x.copy()
+            X, Y = np.meshgrid(x, y)
+            
+            # Filtros para frequências [a,0], [0,a], [a,a], e [a,-a] onde a=1/winSize
+            w1 = np.exp(-2j * np.pi * STFTalpha * X)
+            w2 = np.exp(-2j * np.pi * STFTalpha * Y)
+            w3 = np.exp(-2j * np.pi * STFTalpha * (X + Y))
+            w4 = np.exp(-2j * np.pi * STFTalpha * (X - Y))
+            
+            # Aplicar convolução 2D com os filtros
+            f1 = signal.convolve2d(normalized_mel, w1, mode='same')
+            f2 = signal.convolve2d(normalized_mel, w2, mode='same')
+            f3 = signal.convolve2d(normalized_mel, w3, mode='same')
+            f4 = signal.convolve2d(normalized_mel, w4, mode='same')
+            
+            # Obter os sinais de fase
+            phase1 = np.sign(np.real(f1))
+            phase2 = np.sign(np.imag(f1))
+            phase3 = np.sign(np.real(f2))
+            phase4 = np.sign(np.imag(f2))
+            phase5 = np.sign(np.real(f3))
+            phase6 = np.sign(np.imag(f3))
+            phase7 = np.sign(np.real(f4))
+            phase8 = np.sign(np.imag(f4))
+            
+            # Codificar as fases para formar o descritor LPQ
+            phase1[phase1 < 0] = 0
+            phase2[phase2 < 0] = 0
+            phase3[phase3 < 0] = 0
+            phase4[phase4 < 0] = 0
+            phase5[phase5 < 0] = 0
+            phase6[phase6 < 0] = 0
+            phase7[phase7 < 0] = 0
+            phase8[phase8 < 0] = 0
+            
+            # Combinar as fases para formar o descritor LPQ
+            lpq = (phase1*1 + phase2*2 + phase3*4 + phase4*8 +
+                phase5*16 + phase6*32 + phase7*64 + phase8*128)
+            
+            return lpq
         
-        # Parâmetros para LPQ
-        winSize = 5  # Tamanho da janela para LPQ
-        
-        # Implementação simplificada de LPQ
-        # (Nota: Para uma implementação completa, recomenda-se usar bibliotecas específicas)
-        STFTalpha = 1/winSize  # Parâmetro alfa para STFT
-        
-        # Criar filtros para STFT
-        x = np.arange(-(winSize-1)/2, (winSize+1)/2, 1)
-        y = x.copy()
-        X, Y = np.meshgrid(x, y)
-        
-        # Filtros para frequências [a,0], [0,a], [a,a], e [a,-a] onde a=1/winSize
-        w1 = np.exp(-2j * np.pi * STFTalpha * X)
-        w2 = np.exp(-2j * np.pi * STFTalpha * Y)
-        w3 = np.exp(-2j * np.pi * STFTalpha * (X + Y))
-        w4 = np.exp(-2j * np.pi * STFTalpha * (X - Y))
-        
-        # Aplicar convolução 2D com os filtros
-        f1 = scipy.signal.convolve2d(normalized_mel, w1, mode='same')
-        f2 = scipy.signal.convolve2d(normalized_mel, w2, mode='same')
-        f3 = scipy.signal.convolve2d(normalized_mel, w3, mode='same')
-        f4 = scipy.signal.convolve2d(normalized_mel, w4, mode='same')
-        
-        # Obter os sinais de fase
-        phase1 = np.sign(np.real(f1))
-        phase2 = np.sign(np.imag(f1))
-        phase3 = np.sign(np.real(f2))
-        phase4 = np.sign(np.imag(f2))
-        phase5 = np.sign(np.real(f3))
-        phase6 = np.sign(np.imag(f3))
-        phase7 = np.sign(np.real(f4))
-        phase8 = np.sign(np.imag(f4))
-        
-        # Codificar as fases para formar o descritor LPQ
-        phase1[phase1 < 0] = 0
-        phase2[phase2 < 0] = 0
-        phase3[phase3 < 0] = 0
-        phase4[phase4 < 0] = 0
-        phase5[phase5 < 0] = 0
-        phase6[phase6 < 0] = 0
-        phase7[phase7 < 0] = 0
-        phase8[phase8 < 0] = 0
-        
-        # Combinar as fases para formar o descritor LPQ
-        lpq = (phase1*1 + phase2*2 + phase3*4 + phase4*8 +
-               phase5*16 + phase6*32 + phase7*64 + phase8*128)
-        
-        return lpq
+        except Exception as e:
+            print(f"Erro ao extrair LPQ: {str(e)}")
+            # Retornar matriz de zeros em caso de erro
+            return np.zeros_like(mel_spectrogram)
         
     def remove_silence(self, audio, threshold=None, min_silence_duration=None):
         """
@@ -396,46 +493,62 @@ class FeatureExtractor:
         Returns:
             Dicionário com todas as características extraídas
         """
-        # Carregar o áudio
-        audio, _ = librosa.load(audio_path, sr=self.sample_rate, mono=True)
-        
-        # Pré-processar o áudio
-        audio = self.preprocess_audio(audio)
-        
-        # Remover silêncio
-        audio_no_silence = self.remove_silence(audio)
-        
-        # Extrair características
-        mfcc_features = self.extract_mfcc(audio_no_silence)
-        cqcc_features = self.extract_cqcc(audio_no_silence)
-        mel_spec = self.extract_mel_spectrogram(audio_no_silence)
-        
-        # Extrair características de padrões do espectrograma Mel
-        lbp_features = self.extract_lbp(mel_spec)
-        glcm_features = self.extract_glcm(mel_spec)
-        lpq_features = self.extract_lpq(mel_spec)
-        
-        # Normalização (se solicitado)
-        if normalize:
-            # Para MFCC e CQCC (normalização por característica)
-            mfcc_features = (mfcc_features - np.mean(mfcc_features, axis=1, keepdims=True)) / (np.std(mfcc_features, axis=1, keepdims=True) + 1e-10)
-            cqcc_features = (cqcc_features - np.mean(cqcc_features, axis=1, keepdims=True)) / (np.std(cqcc_features, axis=1, keepdims=True) + 1e-10)
+        try:
+            # Carregar o áudio
+            audio, sr = self.load_audio(audio_path)
             
-            # Para os padrões extraídos
-            lbp_features = (lbp_features - np.mean(lbp_features)) / (np.std(lbp_features) + 1e-10)
-            lpq_features = (lpq_features - np.mean(lpq_features)) / (np.std(lpq_features) + 1e-10)
+            # Verificar se o áudio foi carregado corretamente
+            if audio is None or len(audio) == 0:
+                raise ValueError(f"Áudio vazio ou não carregado: {audio_path}")
             
-            # Para GLCM (já normalizado durante a extração)
-        
-        # Retornar dicionário com todas as características
-        return {
-            'mfcc': mfcc_features,
-            'cqcc': cqcc_features,
-            'mel_spectrogram': mel_spec,
-            'lbp': lbp_features,
-            'glcm': glcm_features,
-            'lpq': lpq_features
-        }
+            # Pré-processar o áudio
+            audio = self.preprocess_audio(audio)
+            
+            # Remover silêncio
+            try:
+                audio_no_silence = self.remove_silence(audio)
+                # Se remoção de silêncio resultar em áudio muito curto, usar o original
+                if len(audio_no_silence) < 0.1 * self.sample_rate:
+                    audio_no_silence = audio
+            except Exception as e:
+                print(f"Erro ao remover silêncio: {str(e)}. Usando áudio original.")
+                audio_no_silence = audio
+            
+            # Extrair características
+            mfcc_features = self.extract_mfcc(audio_no_silence)
+            cqcc_features = self.extract_cqcc(audio_no_silence)
+            mel_spec = self.extract_mel_spectrogram(audio_no_silence)
+            
+            # Extrair características de padrões do espectrograma Mel
+            lbp_features = self.extract_lbp(mel_spec)
+            glcm_features = self.extract_glcm(mel_spec)
+            lpq_features = self.extract_lpq(mel_spec)
+            
+            # Normalização (se solicitado)
+            if normalize:
+                # Para MFCC e CQCC (normalização por característica)
+                mfcc_features = (mfcc_features - np.mean(mfcc_features, axis=1, keepdims=True)) / (np.std(mfcc_features, axis=1, keepdims=True) + 1e-10)
+                cqcc_features = (cqcc_features - np.mean(cqcc_features, axis=1, keepdims=True)) / (np.std(cqcc_features, axis=1, keepdims=True) + 1e-10)
+                
+                # Para os padrões extraídos
+                lbp_features = (lbp_features - np.mean(lbp_features)) / (np.std(lbp_features) + 1e-10)
+                lpq_features = (lpq_features - np.mean(lpq_features)) / (np.std(lpq_features) + 1e-10)
+                
+                # Para GLCM (já normalizado durante a extração)
+            
+            # Retornar dicionário com todas as características
+            return {
+                'mfcc': mfcc_features,
+                'cqcc': cqcc_features,
+                'mel_spectrogram': mel_spec,
+                'lbp': lbp_features,
+                'glcm': glcm_features,
+                'lpq': lpq_features
+            }
+        except Exception as e:
+            print(f"Erro ao processar {audio_path}: {str(e)}")
+            print(traceback.format_exc())
+            return None
     
     def batch_feature_extraction(self, audio_dir, output_dir=None, file_ext='.flac'):
         """
@@ -455,46 +568,155 @@ class FeatureExtractor:
         if output_dir is not None and not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        # Iterar sobre os arquivos de áudio
-        for filename in os.listdir(audio_dir):
-            if filename.endswith(file_ext):
-                audio_path = os.path.join(audio_dir, filename)
-                features = self.extract_hybrid_features(audio_path)
-                all_features[filename] = features
-                
-                # Salvar características em disco (se solicitado)
-                if output_dir is not None:
-                    output_path = os.path.join(output_dir, f"{os.path.splitext(filename)[0]}.npz")
-                    np.savez(
-                        output_path, 
-                        mfcc=features['mfcc'],
-                        cqcc=features['cqcc'],
-                        mel_spectrogram=features['mel_spectrogram'],
-                        lbp=features['lbp'],
-                        glcm=features['glcm'],
-                        lpq=features['lpq']
-                    )
+        # Encontrar todos os arquivos de áudio
+        audio_files = []
+        for root, dirs, files in os.walk(audio_dir):
+            for file in files:
+                if file.endswith(file_ext):
+                    audio_files.append(os.path.join(root, file))
         
+        # Iterar sobre os arquivos de áudio com barra de progresso
+        for audio_path in tqdm(audio_files, desc=f"Extraindo características de {audio_dir}"):
+            try:
+                # Obter nome de arquivo relativo
+                rel_path = os.path.relpath(audio_path, audio_dir)
+                filename = os.path.basename(audio_path)
+                
+                # Extrair características
+                features = self.extract_hybrid_features(audio_path)
+                
+                if features is not None:
+                    all_features[filename] = features
+                    
+                    # Salvar características em disco (se solicitado)
+                    if output_dir is not None:
+                        # Preservar hierarquia de diretórios
+                        output_path = os.path.join(output_dir, os.path.splitext(rel_path)[0] + '.npz')
+                        output_subdir = os.path.dirname(output_path)
+                        
+                        # Criar subdiretório se não existir
+                        if not os.path.exists(output_subdir):
+                            os.makedirs(output_subdir)
+                        
+                        np.savez(
+                            output_path, 
+                            mfcc=features['mfcc'],
+                            cqcc=features['cqcc'],
+                            mel_spectrogram=features['mel_spectrogram'],
+                            lbp=features['lbp'],
+                            glcm=features['glcm'],
+                            lpq=features['lpq']
+                        )
+            except Exception as e:
+                print(f"Erro ao processar {audio_path}: {str(e)}")
+        
+        print(f"Extração concluída. Processados {len(all_features)}/{len(audio_files)} arquivos.")
         return all_features
 
 
-# Exemplo de uso
-if __name__ == "__main__":
+def parse_args():
+    """
+    Analisa argumentos de linha de comando.
+    
+    Returns:
+        Argumentos analisados
+    """
+    parser = argparse.ArgumentParser(description="Extração de características para detecção de ataques de replay")
+    
+    parser.add_argument('--train-audio-dir', type=str, required=True,
+                        help='Diretório com arquivos de áudio de treinamento')
+    parser.add_argument('--dev-audio-dir', type=str, required=True,
+                        help='Diretório com arquivos de áudio de validação')
+    parser.add_argument('--eval-audio-dir', type=str, required=True,
+                        help='Diretório com arquivos de áudio de avaliação')
+    parser.add_argument('--output-dir', type=str, required=True,
+                        help='Diretório para salvar características extraídas')
+    parser.add_argument('--audio-ext', type=str, default='.flac',
+                        help='Extensão dos arquivos de áudio')
+    
+    parser.add_argument('--sample-rate', type=int, default=16000,
+                        help='Taxa de amostragem do áudio')
+    parser.add_argument('--n-mfcc', type=int, default=30,
+                        help='Número de coeficientes MFCC')
+    parser.add_argument('--n-cqcc', type=int, default=30,
+                        help='Número de coeficientes CQCC')
+    parser.add_argument('--n-mels', type=int, default=257,
+                        help='Número de bandas Mel para o espectrograma')
+    
+    return parser.parse_args()
+
+
+def main():
+    """
+    Função principal.
+    """
+    # Analisar argumentos
+    args = parse_args()
+    
+    # Criar diretórios de saída
+    train_output_dir = os.path.join(args.output_dir, 'train')
+    dev_output_dir = os.path.join(args.output_dir, 'dev')
+    eval_output_dir = os.path.join(args.output_dir, 'eval')
+    
+    # Criar extrator de características
+    extractor = FeatureExtractor(
+        sample_rate=args.sample_rate,
+        n_mfcc=args.n_mfcc,
+        n_cqcc=args.n_cqcc,
+        n_mels=args.n_mels
+    )
+    
+    # Extrair características
+    print("Extraindo características do conjunto de treinamento...")
+    train_features = extractor.batch_feature_extraction(args.train_audio_dir, train_output_dir, args.audio_ext)
+    
+    print("Extraindo características do conjunto de validação...")
+    dev_features = extractor.batch_feature_extraction(args.dev_audio_dir, dev_output_dir, args.audio_ext)
+    
+    print("Extraindo características do conjunto de avaliação...")
+    eval_features = extractor.batch_feature_extraction(args.eval_audio_dir, eval_output_dir, args.audio_ext)
+    
+    print(f"Características extraídas e salvas em: {args.output_dir}")
+    
+    return 0
+
+
+# Exemplo de uso individual
+def test_single_file(audio_path):
+    """
+    Testa a extração de características para um único arquivo.
+    
+    Args:
+        audio_path: Caminho para o arquivo de áudio
+    """
+    # Verificar se o arquivo existe
+    if not os.path.exists(audio_path):
+        print(f"Arquivo {audio_path} não encontrado.")
+        return
+    
     # Inicializar o extrator de características
     extractor = FeatureExtractor()
     
-    # Extrair características de um arquivo de áudio
-    audio_path = "caminho/para/arquivo_de_audio.wav"
+    # Extrair características
+    features = extractor.extract_hybrid_features(audio_path)
     
-    # Verificar se o arquivo existe
-    if os.path.exists(audio_path):
-        features = extractor.extract_hybrid_features(audio_path)
-        
-        # Exibir informações sobre as características extraídas
+    # Exibir informações sobre as características extraídas
+    if features is not None:
         for feature_name, feature_data in features.items():
             if isinstance(feature_data, np.ndarray):
                 print(f"{feature_name}: shape={feature_data.shape}, dtype={feature_data.dtype}")
             else:
                 print(f"{feature_name}: type={type(feature_data)}")
     else:
-        print(f"Arquivo {audio_path} não encontrado. Substitua pelo caminho correto para testar.")
+        print("Falha na extração de características.")
+
+
+if __name__ == "__main__":
+    # Verificar se é para testar um único arquivo
+    import sys
+    if len(sys.argv) == 2 and os.path.isfile(sys.argv[1]):
+        # Modo de teste para um único arquivo
+        test_single_file(sys.argv[1])
+    else:
+        # Modo normal com argumentos
+        sys.exit(main())

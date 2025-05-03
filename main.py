@@ -27,7 +27,7 @@ def parse_args():
     # Argumentos gerais
     parser.add_argument('--task', type=str, required=True, choices=['extract', 'train', 'test', 'all'],
                         help='Tarefa a ser executada')
-    parser.add_argument('--config', type=str, default='config/default.json',
+    parser.add_argument('--config', type=str, default='config.json',
                         help='Arquivo de configuração')
     parser.add_argument('--output-dir', type=str, default='output',
                         help='Diretório de saída para resultados')
