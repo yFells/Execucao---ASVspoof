@@ -15,6 +15,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import os
 import pickle
+import random # Importar random para amostragem
 
 class BidirectionalSegmentation:
     """
@@ -107,7 +108,7 @@ class BidirectionalDataset(Dataset):
     Dataset que implementa a segmentação bidirecional para uso com PyTorch DataLoader.
     """
     
-    def __init__(self, features_dir, labels_file, segment_length=400, stride=200, transform=None):
+    def __init__(self, features_dir, labels_file, segment_length=400, stride=200, transform=None, sample_proportion=1.0):
         """
         Inicializa o dataset.
         
@@ -117,15 +118,15 @@ class BidirectionalDataset(Dataset):
             segment_length: Comprimento do segmento em frames
             stride: Tamanho do salto entre segmentos consecutivos
             transform: Transformações a serem aplicadas às características
+            sample_proportion: Proporção do dataset a ser usado (0.0 a 1.0).
+                               Amostragem proporcional por classe é aplicada.
         """
         self.features_dir = features_dir
         self.transform = transform
         self.bidirectional_segmentation = BidirectionalSegmentation(segment_length, stride)
         
         # Carregar lista de arquivos e rótulos
-        self.files = []
-        self.labels = []
-        
+        all_files_labels = []
         with open(labels_file, 'r') as f:
             for line in f:
                 parts = line.strip().split()
@@ -135,9 +136,34 @@ class BidirectionalDataset(Dataset):
                     
                     npz_path = os.path.join(features_dir, f"{file_id}.npz")
                     if os.path.exists(npz_path):
-                        self.files.append(npz_path)
-                        self.labels.append(label)
+                        all_files_labels.append({'file_id': file_id, 'label': label, 'npz_path': npz_path})
         
+        # Aplicar amostragem se a proporção for menor que 1.0
+        if 0 < sample_proportion < 1.0:
+            genuine_samples = [item for item in all_files_labels if item['label'] == 0]
+            spoof_samples = [item for item in all_files_labels if item['label'] == 1]
+
+            num_genuine_to_sample = int(len(genuine_samples) * sample_proportion)
+            num_spoof_to_sample = int(len(spoof_samples) * sample_proportion)
+
+            # Garantir que não tentamos amostrar mais do que o disponível
+            num_genuine_to_sample = min(num_genuine_to_sample, len(genuine_samples))
+            num_spoof_to_sample = min(num_spoof_to_sample, len(spoof_samples))
+            
+            sampled_genuine = random.sample(genuine_samples, num_genuine_to_sample)
+            sampled_spoof = random.sample(spoof_samples, num_spoof_to_sample)
+            
+            sampled_files_labels = sampled_genuine + sampled_spoof
+            random.shuffle(sampled_files_labels) # Embaralhar para misturar genuínos e spoof
+            
+            self.files = [item['npz_path'] for item in sampled_files_labels]
+            self.labels = [item['label'] for item in sampled_files_labels]
+            print(f"Dataset reduzido para {len(self.files)} arquivos ({num_genuine_to_sample} genuínos, {num_spoof_to_sample} spoof) com proporção {sample_proportion*100:.2f}%")
+        else:
+            self.files = [item['npz_path'] for item in all_files_labels]
+            self.labels = [item['label'] for item in all_files_labels]
+            print(f"Usando o dataset completo com {len(self.files)} arquivos.")
+
         # Pré-processar dados para criar índices de segmentos
         self.segment_indices = []
         self.file_segments = []
@@ -147,11 +173,31 @@ class BidirectionalDataset(Dataset):
             features_dict = np.load(npz_path)
             
             # Combinar MFCC e CQCC para características híbridas
-            mfcc = features_dict['mfcc'].T  # Transpor para ter formato (tempo x dimensão)
-            cqcc = features_dict['cqcc'].T
+            # Assumindo que 'mfcc' e 'cqcc' são as chaves corretas no .npz
+            # Verificar se as chaves existem para evitar KeyError
+            mfcc = features_dict['mfcc'].T if 'mfcc' in features_dict else np.array([])
+            cqcc = features_dict['cqcc'].T if 'cqcc' in features_dict else np.array([])
+
+            # Lidar com casos onde uma das características pode estar vazia após a transposição
+            if mfcc.size == 0 and cqcc.size == 0:
+                print(f"Aviso: Nenhuma característica MFCC ou CQCC encontrada para {npz_path}. Pulando.")
+                continue
+            elif mfcc.size == 0:
+                hybrid_features = cqcc
+            elif cqcc.size == 0:
+                hybrid_features = mfcc
+            else:
+                # Garantir que as dimensões correspondam para concatenação (número de frames)
+                if mfcc.shape[0] != cqcc.shape[0]:
+                    min_frames = min(mfcc.shape[0], cqcc.shape[0])
+                    mfcc = mfcc[:min_frames, :]
+                    cqcc = cqcc[:min_frames, :]
+                hybrid_features = np.concatenate([mfcc, cqcc], axis=1)
             
-            hybrid_features = np.concatenate([mfcc, cqcc], axis=1)
-            
+            if hybrid_features.shape[0] == 0:
+                print(f"Aviso: Características híbridas vazias para {npz_path}. Pulando.")
+                continue
+
             # Segmentar características
             segments = self.bidirectional_segmentation.segment_features(hybrid_features)
             self.file_segments.append(segments)
@@ -200,7 +246,7 @@ class BidirectionalDataLoader:
     """
     
     def __init__(self, features_dir, labels_file, batch_size=32, segment_length=400, 
-                 stride=200, num_workers=4, shuffle=True, transform=None):
+                 stride=200, num_workers=4, shuffle=True, transform=None, sample_proportion=1.0):
         """
         Inicializa o gerenciador de DataLoader com segmentação bidirecional.
         
@@ -213,6 +259,7 @@ class BidirectionalDataLoader:
             num_workers: Número de processos para carregamento paralelo
             shuffle: Se True, embaralha os dados a cada época
             transform: Transformações a serem aplicadas às características
+            sample_proportion: Proporção do dataset a ser usado (0.0 a 1.0).
         """
         # Criar dataset
         self.dataset = BidirectionalDataset(
@@ -220,7 +267,8 @@ class BidirectionalDataLoader:
             labels_file, 
             segment_length, 
             stride, 
-            transform
+            transform,
+            sample_proportion # Passar sample_proportion para o Dataset
         )
         
         # Criar dataloader
@@ -267,3 +315,4 @@ if __name__ == "__main__":
             first_frame_forward = forward[0]
             last_frame_backward = backward[-1]
             print(f"  O primeiro frame de forward é igual ao último de backward? {np.array_equal(first_frame_forward, last_frame_backward)}")
+

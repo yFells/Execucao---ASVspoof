@@ -18,6 +18,7 @@ import warnings
 from tqdm import tqdm
 import argparse
 import traceback
+import random # Importar random para amostragem
 
 # Para tentar alternativas quando o librosa falhar
 try:
@@ -93,7 +94,8 @@ class FeatureExtractor:
                 audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
             return audio, self.sample_rate
         except Exception as e:
-            print(f"Falha ao abrir com soundfile: {str(e)}")
+            # print(f"Falha ao abrir com soundfile: {str(e)}") # Comentado para evitar spam no console
+            pass
         
         # Método 2: Tentar com librosa
         try:
@@ -102,7 +104,8 @@ class FeatureExtractor:
                 audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
                 return audio, sr
         except Exception as e:
-            print(f"Falha ao abrir com librosa: {str(e)}")
+            # print(f"Falha ao abrir com librosa: {str(e)}") # Comentado para evitar spam no console
+            pass
         
         # Método 3: Tentar com pydub se disponível
         if PYDUB_AVAILABLE:
@@ -129,7 +132,8 @@ class FeatureExtractor:
                 
                 return samples, self.sample_rate
             except Exception as e:
-                print(f"Falha ao abrir com pydub: {str(e)}")
+                # print(f"Falha ao abrir com pydub: {str(e)}") # Comentado para evitar spam no console
+                pass
         
         # Se todas as tentativas falharem
         raise ValueError(f"Não foi possível carregar o arquivo: {audio_path}. Tente instalar ffmpeg ou verifique a integridade do arquivo.")
@@ -550,7 +554,7 @@ class FeatureExtractor:
             print(traceback.format_exc())
             return None
     
-    def batch_feature_extraction(self, audio_dir, output_dir=None, file_ext='.flac'):
+    def batch_feature_extraction(self, audio_dir, output_dir=None, file_ext='.flac', labels_file=None, sample_proportion=0.5):
         """
         Extrai características de todos os arquivos de áudio em um diretório.
         
@@ -558,6 +562,8 @@ class FeatureExtractor:
             audio_dir: Diretório contendo arquivos de áudio
             output_dir: Diretório para salvar as características (opcional)
             file_ext: Extensão dos arquivos de áudio
+            labels_file: Caminho para o arquivo de rótulos (para amostragem proporcional)
+            sample_proportion: Proporção do dataset a ser usado (0.0 a 1.0).
             
         Returns:
             Dicionário com características de todos os arquivos
@@ -569,14 +575,74 @@ class FeatureExtractor:
             os.makedirs(output_dir)
         
         # Encontrar todos os arquivos de áudio
-        audio_files = []
+        all_audio_files = []
         for root, dirs, files in os.walk(audio_dir):
             for file in files:
                 if file.endswith(file_ext):
-                    audio_files.append(os.path.join(root, file))
+                    all_audio_files.append(os.path.join(root, file))
         
+        audio_files_to_process = []
+
+        # Aplicar amostragem se a proporção for menor que 1.0 e labels_file for fornecido
+        if 0 < sample_proportion < 1.0 and labels_file:
+            print(f"Amostrando {sample_proportion*100:.2f}% do dataset para extração de características...")
+            genuine_samples = []
+            spoof_samples = []
+
+            # Ler os rótulos para mapear file_id para label
+            file_labels = {}
+            try:
+                with open(labels_file, 'r') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            file_id = parts[0]
+                            label = parts[1] # 'bonafide'/'genuine' ou 'spoof'
+                            file_labels[file_id] = label
+            except FileNotFoundError:
+                print(f"Aviso: Arquivo de rótulos '{labels_file}' não encontrado. A amostragem proporcional não será aplicada.")
+                # Se o arquivo de rótulos não for encontrado, processar todos os arquivos
+                audio_files_to_process = all_audio_files
+            
+            if file_labels: # Se os rótulos foram carregados com sucesso
+                for audio_path in all_audio_files:
+                    file_id = os.path.splitext(os.path.basename(audio_path))[0]
+                    label = file_labels.get(file_id)
+                    if label:
+                        if label.lower() in ['bonafide', 'genuine']:
+                            genuine_samples.append(audio_path)
+                        elif label.lower() == 'spoof':
+                            spoof_samples.append(audio_path)
+                    else:
+                        # Se o arquivo de áudio não tiver um rótulo correspondente, adicioná-lo a uma categoria "desconhecida"
+                        # ou simplesmente ignorá-lo para a amostragem proporcional.
+                        # Por simplicidade, vamos ignorá-lo para a amostragem proporcional
+                        # e ele não será incluído nos 30% se não tiver rótulo.
+                        pass
+                
+                num_genuine_to_sample = int(len(genuine_samples) * sample_proportion)
+                num_spoof_to_sample = int(len(spoof_samples) * sample_proportion)
+
+                # Garantir que não tentamos amostrar mais do que o disponível
+                num_genuine_to_sample = min(num_genuine_to_sample, len(genuine_samples))
+                num_spoof_to_sample = min(num_spoof_to_sample, len(spoof_samples))
+                
+                sampled_genuine = random.sample(genuine_samples, num_genuine_to_sample)
+                sampled_spoof = random.sample(spoof_samples, num_spoof_to_sample)
+                
+                audio_files_to_process = sampled_genuine + sampled_spoof
+                random.shuffle(audio_files_to_process) # Embaralhar para misturar genuínos e spoof
+                print(f"Extraindo características para {len(audio_files_to_process)} arquivos ({num_genuine_to_sample} genuínos, {num_spoof_to_sample} spoof) após amostragem.")
+            else:
+                # Se não conseguiu carregar os rótulos, processa todos os arquivos
+                audio_files_to_process = all_audio_files
+                print(f"Amostragem proporcional não aplicada. Processando todos os {len(audio_files_to_process)} arquivos.")
+        else:
+            audio_files_to_process = all_audio_files
+            print(f"Processando todos os {len(audio_files_to_process)} arquivos (sample_proportion={sample_proportion}).")
+
         # Iterar sobre os arquivos de áudio com barra de progresso
-        for audio_path in tqdm(audio_files, desc=f"Extraindo características de {audio_dir}"):
+        for audio_path in tqdm(audio_files_to_process, desc=f"Extraindo características de {audio_dir}"):
             try:
                 # Obter nome de arquivo relativo
                 rel_path = os.path.relpath(audio_path, audio_dir)
@@ -609,8 +675,9 @@ class FeatureExtractor:
                         )
             except Exception as e:
                 print(f"Erro ao processar {audio_path}: {str(e)}")
+                print(traceback.format_exc())
         
-        print(f"Extração concluída. Processados {len(all_features)}/{len(audio_files)} arquivos.")
+        print(f"Extração concluída. Processados {len(all_features)}/{len(audio_files_to_process)} arquivos.")
         return all_features
 
 
@@ -623,17 +690,27 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(description="Extração de características para detecção de ataques de replay")
     
-    parser.add_argument('--train-audio-dir', type=str, required=True,
+    parser.add_argument('--train-audio-dir', type=str, default=None,
                         help='Diretório com arquivos de áudio de treinamento')
-    parser.add_argument('--dev-audio-dir', type=str, required=True,
+    parser.add_argument('--dev-audio-dir', type=str, default=None,
                         help='Diretório com arquivos de áudio de validação')
-    parser.add_argument('--eval-audio-dir', type=str, required=True,
+    parser.add_argument('--eval-audio-dir', type=str, required=True, # Eval audio dir é sempre necessário
                         help='Diretório com arquivos de áudio de avaliação')
     parser.add_argument('--output-dir', type=str, required=True,
                         help='Diretório para salvar características extraídas')
     parser.add_argument('--audio-ext', type=str, default='.flac',
                         help='Extensão dos arquivos de áudio')
     
+    parser.add_argument('--train-labels-file', type=str, default=None,
+                        help='Arquivo com rótulos de treinamento (para amostragem proporcional)')
+    parser.add_argument('--dev-labels-file', type=str, default=None,
+                        help='Arquivo com rótulos de validação (para amostragem proporcional)')
+    parser.add_argument('--eval-labels-file', type=str, required=True, # Eval labels file é sempre necessário
+                        help='Arquivo com rótulos de avaliação (para amostragem proporcional)')
+    
+    parser.add_argument('--sample-proportion', type=float, default=1.0,
+                        help='Proporção do dataset a ser usado para extração de características (0.0 a 1.0)')
+
     parser.add_argument('--sample-rate', type=int, default=16000,
                         help='Taxa de amostragem do áudio')
     parser.add_argument('--n-mfcc', type=int, default=30,
@@ -653,11 +730,6 @@ def main():
     # Analisar argumentos
     args = parse_args()
     
-    # Criar diretórios de saída
-    train_output_dir = os.path.join(args.output_dir, 'train')
-    dev_output_dir = os.path.join(args.output_dir, 'dev')
-    eval_output_dir = os.path.join(args.output_dir, 'eval')
-    
     # Criar extrator de características
     extractor = FeatureExtractor(
         sample_rate=args.sample_rate,
@@ -666,15 +738,37 @@ def main():
         n_mels=args.n_mels
     )
     
-    # Extrair características
-    print("Extraindo características do conjunto de treinamento...")
-    train_features = extractor.batch_feature_extraction(args.train_audio_dir, train_output_dir, args.audio_ext)
-    
-    print("Extraindo características do conjunto de validação...")
-    dev_features = extractor.batch_feature_extraction(args.dev_audio_dir, dev_output_dir, args.audio_ext)
-    
-    print("Extraindo características do conjunto de avaliação...")
-    eval_features = extractor.batch_feature_extraction(args.eval_audio_dir, eval_output_dir, args.audio_ext)
+    # Extrair características para o conjunto de treinamento
+    if args.train_audio_dir and args.train_labels_file:
+        train_output_dir = os.path.join(args.output_dir, 'train')
+        print("Extraindo características do conjunto de treinamento...")
+        train_features = extractor.batch_feature_extraction(
+            args.train_audio_dir, train_output_dir, args.audio_ext,
+            labels_file=args.train_labels_file, sample_proportion=args.sample_proportion
+        )
+    else:
+        print("Diretório de áudio ou arquivo de rótulos de treinamento não fornecidos. Pulando extração de treinamento.")
+        train_features = {}
+
+    # Extrair características para o conjunto de validação
+    if args.dev_audio_dir and args.dev_labels_file:
+        dev_output_dir = os.path.join(args.output_dir, 'dev')
+        print("Extraindo características do conjunto de validação...")
+        dev_features = extractor.batch_feature_extraction(
+            args.dev_audio_dir, dev_output_dir, args.audio_ext,
+            labels_file=args.dev_labels_file, sample_proportion=args.sample_proportion
+        )
+    else:
+        print("Diretório de áudio ou arquivo de rótulos de validação não fornecidos. Pulando extração de validação.")
+        dev_features = {}
+
+    # Extrair características para o conjunto de avaliação (TESTE COMPLETO)
+    eval_output_dir = os.path.join(args.output_dir, 'eval')
+    print("Extraindo características do conjunto de avaliação (completo para teste)...")
+    eval_features = extractor.batch_feature_extraction(
+        args.eval_audio_dir, eval_output_dir, args.audio_ext,
+        labels_file=args.eval_labels_file, sample_proportion=0.5 # Sempre 1.0 para avaliação
+    )
     
     print(f"Características extraídas e salvas em: {args.output_dir}")
     

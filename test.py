@@ -49,7 +49,7 @@ def load_model(checkpoint_path, device):
     return model, score_weights
 
 
-def prepare_dataloader(features_dir, labels_file, batch_size=32, segment_length=400, stride=200, num_workers=4):
+def prepare_dataloader(features_dir, labels_file, batch_size=32, segment_length=400, stride=200, num_workers=4, sample_proportion=0.7): # Adicionado sample_proportion
     """
     Prepara DataLoader para teste.
     
@@ -60,13 +60,15 @@ def prepare_dataloader(features_dir, labels_file, batch_size=32, segment_length=
         segment_length: Comprimento do segmento em frames
         stride: Tamanho do salto entre segmentos consecutivos
         num_workers: Número de processos para carregamento paralelo
+        sample_proportion: Proporção do dataset a ser usado (0.0 a 1.0).
         
     Returns:
         DataLoader para teste
     """
     # Criar DataLoader
     test_loader = BidirectionalDataLoader(
-        features_dir, labels_file, batch_size, segment_length, stride, num_workers, shuffle=False
+        features_dir, labels_file, batch_size, segment_length, stride, num_workers, shuffle=False,
+        sample_proportion=sample_proportion # Passa sample_proportion
     ).get_dataloader()
     
     return test_loader
@@ -289,6 +291,10 @@ def parse_args():
     parser.add_argument('--cross-dataset-labels-file', type=str, default='data/ASVspoof2021/eval/labels.txt',
                         help='Arquivo com rótulos do outro conjunto de dados')
     
+    # Argumentos para amostragem do dataset (para o test.py, sempre 1.0 para o dataset de teste principal)
+    parser.add_argument('--sample-proportion', type=float, default=1.0,
+                        help='Proporção do dataset a ser usado para treinamento e validação (0.0 a 1.0). Usado para loaders de treino/dev em análise de generalização.')
+
     return parser.parse_args()
 
 
@@ -311,9 +317,11 @@ def main():
     
     # Preparar DataLoader para teste
     print("Preparando DataLoader para teste...")
+    # Para o teste principal, a proporção deve ser sempre 1.0, conforme solicitado pelo usuário
     test_loader = prepare_dataloader(
         args.test_features_dir, args.test_labels_file,
-        args.batch_size, args.segment_length, args.stride, args.num_workers
+        args.batch_size, args.segment_length, args.stride, args.num_workers,
+        sample_proportion=0.7 # Força o uso do dataset completo para teste
     )
     
     # Carregar modelo
@@ -330,9 +338,11 @@ def main():
         print("\nAnalisando capacidade de generalização do modelo...")
         
         # Preparar DataLoader para treinamento (para análise de generalização)
+        # Aqui, o train_loader para análise de generalização deve usar a proporção reduzida
         train_loader = prepare_dataloader(
             args.train_features_dir, args.train_labels_file,
-            args.batch_size, args.segment_length, args.stride, args.num_workers
+            args.batch_size, args.segment_length, args.stride, args.num_workers,
+            sample_proportion=args.sample_proportion # Usa a proporção definida para treinamento
         )
         
         # Analisar generalização
@@ -349,9 +359,11 @@ def main():
             print("\nRealizando análise cruzada entre conjuntos de dados...")
             
             # Preparar DataLoader para o outro conjunto de dados
+            # O cross-dataset loader também deve usar a proporção reduzida, se for o caso
             cross_dataset_loader = prepare_dataloader(
                 args.cross_dataset_features_dir, args.cross_dataset_labels_file,
-                args.batch_size, args.segment_length, args.stride, args.num_workers
+                args.batch_size, args.segment_length, args.stride, args.num_workers,
+                sample_proportion=args.sample_proportion # Usa a proporção definida para treinamento
             )
             
             # Analisar generalização cruzada
@@ -368,3 +380,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

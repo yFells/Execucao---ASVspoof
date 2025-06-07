@@ -1,0 +1,15 @@
+{
+    "task": "train",
+    "config": "config.json",
+    "output_dir": "output/experiment1",
+    "gpu": 0,
+    "dataset": "ASVspoof2019PA",
+    "audio_ext": ".flac",
+    "resume": false,
+    "checkpoint": null,
+    "experiment_name": null,
+    "test_only": false,
+    "cross_dataset": false,
+    "cross_dataset_name": "ASVspoof2021",
+    "sample_proportion": 0.2
+}

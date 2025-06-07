@@ -341,7 +341,8 @@ class OCLoss(nn.Module):
         self.m1 = m1
         
         # Vetor de peso para OC-Softmax
-        self.weight = nn.Parameter(torch.Tensor(feature_dim))
+        # CORREÇÃO: Inicializar self.weight como um tensor 2D para xavier_normal_
+        self.weight = nn.Parameter(torch.Tensor(feature_dim, 1)) # Alterado de (feature_dim) para (feature_dim, 1)
         nn.init.xavier_normal_(self.weight)
     
     def forward(self, x, labels):
@@ -360,7 +361,8 @@ class OCLoss(nn.Module):
         x = F.normalize(x, p=2, dim=1)
         
         # Calcular o produto escalar
-        cos_theta = torch.matmul(x, w)
+        # CORREÇÃO: Ajustar a operação matmul para o novo formato de self.weight
+        cos_theta = torch.matmul(x, w).squeeze(-1) # .squeeze(-1) para remover a dimensão extra de 1
         
         # Aplicar as margens de acordo com as classes
         m_y = torch.ones_like(cos_theta)
@@ -428,6 +430,7 @@ class MultiPatternModel(nn.Module):
         self.lpq_branch = PatternBranch(input_channels, 'lpq')
         
         # Camada de OC-Softmax para cada ramo
+        # Passar hidden_size para OCLoss, pois é a dimensão das features de saída da ResNet
         self.lbp_oc_softmax = OCLoss(feature_dim=hidden_size)
         self.glcm_oc_softmax = OCLoss(feature_dim=hidden_size)
         self.lpq_oc_softmax = OCLoss(feature_dim=hidden_size)
@@ -488,10 +491,45 @@ class MultiPatternModel(nn.Module):
         outputs = self.forward(lbp, glcm, lpq)
         
         # Normalizar as saídas
-        lbp_scores = F.softmax(outputs['lbp_output'], dim=1)[:, 1]
-        glcm_scores = F.softmax(outputs['glcm_output'], dim=1)[:, 1]
-        lpq_scores = F.softmax(outputs['lpq_output'], dim=1)[:, 1]
+        # Para OCLoss, a "pontuação" é geralmente a distância ao centro ou algo similar.
+        # Se a saída da OCLoss for uma medida de "anomalia" (maior para spoof),
+        # então F.softmax não é o ideal.
+        # Assumindo que a saída da OCLoss (cos_theta) é a similaridade ao "genuíno"
+        # e que a perda é construída para que pontuações mais baixas indiquem spoof,
+        # então 1 - cos_theta ou simplesmente a saída da OC-Softmax pode ser usada como score.
+        # Se a saída da OCLoss já é a pontuação de "spoofness", podemos usá-la diretamente.
+        # Pelo código da OCLoss, a perda é `log(1 + exp(alpha * ((m_y - cos_theta) * ((-1) ** labels))))`
+        # Para inferência, queremos a pontuação de spoof. `cos_theta` é similaridade com o centro genuíno.
+        # Então, `1 - cos_theta` seria uma pontuação de "spoofness".
+        # No entanto, o modelo está retornando `lbp_output`, `glcm_output`, `lpq_output`
+        # que são as features antes da OCLoss.
+        # A OCLoss calcula a perda com base nessas features e nos labels.
+        # Para `get_scores`, precisamos usar a lógica de pontuação da OCLoss.
+        # O `cos_theta` da OCLoss é a similaridade com o vetor de peso `w`.
+        # Se `labels=0` (genuine), `m0` é usado. Se `labels=1` (spoof), `m1` é usado.
+        # Uma pontuação alta de `cos_theta` significa alta similaridade com o centro genuíno.
+        # Portanto, para uma pontuação de "spoof", podemos usar `1 - cos_theta`.
+
+        # Para obter as pontuações de spoof, precisamos re-calcular o cos_theta
+        # usando as saídas do modelo e os pesos da OCLoss de cada ramo.
         
+        # Obter os pesos normalizados de cada OCLoss
+        w_lbp = F.normalize(self.lbp_oc_softmax.weight, p=2, dim=0)
+        w_glcm = F.normalize(self.glcm_oc_softmax.weight, p=2, dim=0)
+        w_lpq = F.normalize(self.lpq_oc_softmax.weight, p=2, dim=0)
+
+        # Normalizar as features de saída do modelo
+        lbp_features_norm = F.normalize(outputs['lbp_output'], p=2, dim=1)
+        glcm_features_norm = F.normalize(outputs['glcm_output'], p=2, dim=1)
+        lpq_features_norm = F.normalize(outputs['lpq_output'], p=2, dim=1)
+
+        # Calcular cos_theta (similaridade com o centro genuíno)
+        # E então 1 - cos_theta para pontuação de spoof.
+        # .squeeze(-1) é necessário porque w_lbp é (feature_dim, 1)
+        lbp_scores = 1 - torch.matmul(lbp_features_norm, w_lbp).squeeze(-1)
+        glcm_scores = 1 - torch.matmul(glcm_features_norm, w_glcm).squeeze(-1)
+        lpq_scores = 1 - torch.matmul(lpq_features_norm, w_lpq).squeeze(-1)
+
         return {
             'lbp_score': lbp_scores,
             'glcm_score': glcm_scores,
@@ -510,7 +548,8 @@ if __name__ == "__main__":
     input_channels = 1
     height = 113
     width = 390
-    
+    hidden_size = 512 # Definir hidden_size para o exemplo
+
     # Tensores de exemplo para teste
     lbp = torch.randn(batch_size, input_channels, height, width).to(device)
     glcm = torch.randn(batch_size, input_channels, height, width).to(device)
@@ -518,7 +557,7 @@ if __name__ == "__main__":
     labels = torch.randint(0, 2, (batch_size,)).to(device)
     
     # Criar modelo
-    model = MultiPatternModel(input_channels=input_channels).to(device)
+    model = MultiPatternModel(input_channels=input_channels, hidden_size=hidden_size).to(device)
     
     # Modo de treinamento
     model.train()
@@ -533,3 +572,4 @@ if __name__ == "__main__":
         # Exibir pontuações
         for key, value in scores.items():
             print(f"{key}: {value}")
+

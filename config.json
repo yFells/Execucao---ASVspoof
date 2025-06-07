@@ -21,6 +21,15 @@
             "eval_labels_file": "E:/ASV 2019 DATA/ASVspoof2021_PA_eval/ASVspoof2021.PA.cm.eval.trl.txt"
         }
     },
+
+  "reduced_config": {
+    "segment_length": 400,          
+    "mfcc_dims": 13,               
+    "mel_bands": 64,               
+    "hop_length": 256,            
+    "remove_silence": true,        
+    "lda_reduction": true          
+  },
     "feature_extraction": {
         "sample_rate": 16000,
         "n_mfcc": 30,

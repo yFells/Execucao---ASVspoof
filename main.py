@@ -56,6 +56,10 @@ def parse_args():
     parser.add_argument('--cross-dataset-name', type=str, default='ASVspoof2021',
                         help='Nome do conjunto de dados para análise cruzada')
     
+    # Argumentos para amostragem do dataset
+    parser.add_argument('--sample-proportion', type=float, default=1.0,
+                        help='Proporção do dataset a ser usado para treinamento e validação (0.0 a 1.0)')
+
     return parser.parse_args()
 
 
@@ -134,13 +138,18 @@ def extract_features(args, config, experiment_dir):
     os.makedirs(os.path.join(output_features_dir, 'eval'), exist_ok=True)
     
     # Construir comando para executar script de extração
+    # Passar os caminhos dos arquivos de rótulo e a proporção de amostragem
     extract_cmd = [
         'python', 'feature_extraction.py',
         '--train-audio-dir', dataset_config['train_audio_dir'],
         '--dev-audio-dir', dataset_config['dev_audio_dir'],
         '--eval-audio-dir', dataset_config['eval_audio_dir'],
         '--output-dir', output_features_dir,
-        '--audio-ext', args.audio_ext
+        '--audio-ext', args.audio_ext,
+        '--train-labels-file', dataset_config['train_labels_file'],
+        '--dev-labels-file', dataset_config['dev_labels_file'],
+        '--eval-labels-file', dataset_config['eval_labels_file'], # Garantindo que este argumento seja passado
+        '--sample-proportion', str(args.sample_proportion)
     ]
     
     # Executar comando
@@ -182,7 +191,8 @@ def train_model(args, config, experiment_dir):
         '--save-dir', checkpoints_dir,
         '--segment-length', str(config['segmentation']['segment_length']),
         '--stride', str(config['segmentation']['stride']),
-        '--num-workers', str(config['training']['num_workers'])
+        '--num-workers', str(config['training']['num_workers']),
+        '--sample-proportion', str(args.sample_proportion) # Passa sample_proportion
     ]
     
     # Adicionar checkpoint, se fornecido
@@ -232,7 +242,8 @@ def test_model(args, config, experiment_dir):
         '--results-dir', results_dir,
         '--segment-length', str(config['segmentation']['segment_length']),
         '--stride', str(config['segmentation']['stride']),
-        '--num-workers', str(config['testing']['num_workers'])
+        '--num-workers', str(config['testing']['num_workers']),
+        '--sample-proportion', str(args.sample_proportion) # Passa sample_proportion para test.py para loaders de treino/dev em análise de generalização
     ]
     
     # Adicionar análise de generalização, se solicitado
@@ -358,3 +369,4 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
+

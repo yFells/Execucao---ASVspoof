@@ -378,7 +378,7 @@ class Trainer:
 
 
 def prepare_dataloaders(train_features_dir, train_labels_file, dev_features_dir, dev_labels_file, 
-                     batch_size=32, segment_length=400, stride=200, num_workers=4):
+                     batch_size=32, segment_length=400, stride=200, num_workers=4, sample_proportion=0.7): # Adicionado sample_proportion
     """
     Prepara DataLoaders para treinamento e validação.
     
@@ -391,17 +391,20 @@ def prepare_dataloaders(train_features_dir, train_labels_file, dev_features_dir,
         segment_length: Comprimento do segmento em frames
         stride: Tamanho do salto entre segmentos consecutivos
         num_workers: Número de processos para carregamento paralelo
+        sample_proportion: Proporção do dataset a ser usado (0.0 a 1.0).
         
     Returns:
         DataLoaders para treinamento e validação
     """
     # Criar DataLoaders
     train_loader = BidirectionalDataLoader(
-        train_features_dir, train_labels_file, batch_size, segment_length, stride, num_workers, shuffle=True
+        train_features_dir, train_labels_file, batch_size, segment_length, stride, num_workers, shuffle=True,
+        sample_proportion=sample_proportion # Passa sample_proportion
     ).get_dataloader()
     
     dev_loader = BidirectionalDataLoader(
-        dev_features_dir, dev_labels_file, batch_size, segment_length, stride, num_workers, shuffle=False
+        dev_features_dir, dev_labels_file, batch_size, segment_length, stride, num_workers, shuffle=False,
+        sample_proportion=sample_proportion # Passa sample_proportion
     ).get_dataloader()
     
     return train_loader, dev_loader
@@ -447,7 +450,8 @@ def main(args):
     train_loader, dev_loader = prepare_dataloaders(
         args.train_features_dir, args.train_labels_file,
         args.dev_features_dir, args.dev_labels_file,
-        args.batch_size, args.segment_length, args.stride, args.num_workers
+        args.batch_size, args.segment_length, args.stride, args.num_workers,
+        args.sample_proportion # Passa sample_proportion
     )
     
     # Criar modelo
@@ -551,8 +555,13 @@ if __name__ == "__main__":
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Número de processos para carregamento paralelo')
     
+    # Argumentos para amostragem do dataset
+    parser.add_argument('--sample-proportion', type=float, default=1.0,
+                        help='Proporção do dataset a ser usado para treinamento e validação (0.0 a 1.0)')
+
     # Analisar argumentos
     args = parser.parse_args()
     
     # Executar função principal
     main(args)
+
